@@ -35,6 +35,7 @@ table{width:100%;border-collapse:collapse;margin-top:8px}
 th,td{padding:8px;border:1px solid #d2d2d7;text-align:left;font-size:13px;color:#86868b}
 th{background:#f5f5f7;font-weight:600}
 tr:hover{background:#f5f5f7;cursor:pointer}
+tr.scanned-row{background:#e8f5e9}
 .note{color:#86868b;font-size:13px;margin-top:4px}
 .filename-display{background:#f0f8ff;border:2px solid #007aff;border-radius:10px;padding:12px;font-weight:600;color:#007aff;font-size:15px;word-break:break-all;margin-top:8px}
 .scanner-section{background:#f5f5f7;padding:20px;border-radius:12px;margin-bottom:16px}
@@ -46,9 +47,11 @@ tr:hover{background:#f5f5f7;cursor:pointer}
 .alert{padding:14px 16px;border-radius:10px;margin-bottom:16px;font-size:15px;animation:slideIn 0.3s ease}
 .alert-success{background:#E8F5E9;color:#2E7D32}
 .alert-info{background:#E3F2FD;color:#1976D2}
+.alert-warning{background:#FFF3E0;color:#E65100}
 .hidden{display:none}
 @keyframes slideIn{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:translateY(0)}}
 h3{color:#86868b;font-size:17px;font-weight:600;margin-bottom:12px}
+.scan-badge{display:inline-block;background:#4CAF50;color:white;padding:2px 6px;border-radius:4px;font-size:11px;margin-left:4px}
 @media (max-width:768px){button{width:100%;min-width:auto}}
 </style>
 </head>
@@ -242,6 +245,10 @@ let scannedCount = 0;
 let csvImportCount = 0;
 let manualCount = 0;
 
+// NEU: Set zum Tracking bereits gescannter Barcodes
+let scannedBarcodes = new Set();
+let allSerialNumbers = new Set();
+
 // Fokus & Datum setzen
 window.addEventListener('load', function(){
   const sn = document.getElementById('serialNumber'); if(sn) sn.focus();
@@ -357,9 +364,23 @@ async function startScanner() {
         ]
       },
       (decodedText) => {
+        // NEU: Duplikate-Check
+        if(scannedBarcodes.has(decodedText)) {
+          showAlert(`⚠️ Bereits gescannt: ${decodedText}`, 'warning');
+          return;
+        }
+        
+        // Zum Input-Feld hinzufügen
         document.getElementById('serialNumber').value = decodedText;
+        
+        // NEU: Automatisch zur Tabelle hinzufügen
+        addDeviceToTable('scanned');
+        
+        // Barcode zu scannedBarcodes hinzufügen
+        scannedBarcodes.add(decodedText);
+        
         playBeep();
-        showAlert(`✅ Barcode gescannt: ${decodedText}`, 'success');
+        showAlert(`✅ Gescannt & gespeichert: ${decodedText}`, 'success');
         scannedCount++;
         updateStats();
       },
@@ -413,6 +434,8 @@ function resetForm(){
   scannedCount = 0;
   csvImportCount = 0;
   manualCount = 0;
+  scannedBarcodes.clear();
+  allSerialNumbers.clear();
   const today=new Date().toISOString().slice(0,10);
   const delivery=document.getElementById('deliveryDate'); if(delivery) delivery.value=today;
   updateFilenameDisplay();
@@ -420,7 +443,7 @@ function resetForm(){
   setTimeout(()=>document.getElementById('serialNumber').focus(),50);
 }
 
-// Gerät zur Tabelle hinzufügen
+// Gerät zur Tabelle hinzufügen - MODIFIZIERT
 function addDeviceToTable(source = 'manual'){
   const serial = document.getElementById('serialNumber').value.trim();
   const deviceName = document.getElementById('deviceName').value.trim();
@@ -433,8 +456,21 @@ function addDeviceToTable(source = 'manual'){
     return;
   }
   
+  // NEU: Duplikat-Check in der Tabelle
+  if(allSerialNumbers.has(serial)) {
+    showAlert(`⚠️ Seriennummer ${serial} bereits in der Tabelle`, 'warning');
+    document.getElementById('serialNumber').value = '';
+    document.getElementById('serialNumber').focus();
+    return;
+  }
+  
   const tbody = document.getElementById('serialsTable').querySelector('tbody');
   const tr = document.createElement('tr');
+  
+  // NEU: Visuelle Markierung für gescannte Einträge
+  if(source === 'scanned') {
+    tr.classList.add('scanned-row');
+  }
   
   [serial, deviceName, teacherName, schoolClass, notes].forEach(v => {
     const td = document.createElement('td');
@@ -448,7 +484,11 @@ function addDeviceToTable(source = 'manual'){
   btnDel.textContent = '🗑️';
   btnDel.className = 'btn-danger';
   btnDel.style.padding = '4px 8px';
-  btnDel.onclick = () => tr.remove();
+  btnDel.onclick = () => {
+    allSerialNumbers.delete(serial);
+    tr.remove();
+    updateStats();
+  };
   tdAction.appendChild(btnDel);
   tr.appendChild(tdAction);
   
@@ -463,6 +503,9 @@ function addDeviceToTable(source = 'manual'){
   
   tbody.appendChild(tr);
   
+  // NEU: Seriennummer zum Tracking hinzufügen
+  allSerialNumbers.add(serial);
+  
   if(source === 'manual') manualCount++;
   
   document.getElementById('serialNumber').value = '';
@@ -472,7 +515,7 @@ function addDeviceToTable(source = 'manual'){
   document.getElementById('serialNumber').focus();
 }
 
-// CSV Import (mehrere Dateien möglich)
+// CSV Import (mehrere Dateien möglich) - MODIFIZIERT
 document.getElementById('csvFileInput').addEventListener('change', function(){
   const f = this.files && this.files[0]; if(!f) return;
   const reader = new FileReader();
@@ -485,6 +528,7 @@ function parseCsv(text){
   const lines = text.split(/\r?\n/);
   const tbody = document.getElementById('serialsTable').querySelector('tbody');
   let addedCount = 0;
+  let skippedCount = 0;
   
   lines.forEach(line => {
     if(!line.trim()) return;
@@ -496,6 +540,12 @@ function parseCsv(text){
     const note = cols[4] ? cols[4].trim() : '';
     
     if(!serial) return;
+    
+    // NEU: Duplikat-Check bei CSV-Import
+    if(allSerialNumbers.has(serial)) {
+      skippedCount++;
+      return;
+    }
     
     const tr = document.createElement('tr');
     [serial, type, student, klass, note].forEach(v => {
@@ -510,7 +560,11 @@ function parseCsv(text){
     btnDel.textContent = '🗑️';
     btnDel.className = 'btn-danger';
     btnDel.style.padding = '4px 8px';
-    btnDel.onclick = () => tr.remove();
+    btnDel.onclick = () => {
+      allSerialNumbers.delete(serial);
+      tr.remove();
+      updateStats();
+    };
     tdAction.appendChild(btnDel);
     tr.appendChild(tdAction);
     
@@ -524,15 +578,21 @@ function parseCsv(text){
     });
     
     tbody.appendChild(tr);
+    allSerialNumbers.add(serial);
     addedCount++;
   });
   
   csvImportCount += addedCount;
   updateStats();
-  showAlert(`✅ ${addedCount} Einträge aus CSV importiert`, 'success');
+  
+  if(skippedCount > 0) {
+    showAlert(`✅ ${addedCount} importiert, ${skippedCount} Duplikate übersprungen`, 'info');
+  } else {
+    showAlert(`✅ ${addedCount} Einträge aus CSV importiert`, 'success');
+  }
 }
 
-// CSV Export
+// CSV Export - MODIFIZIERT
 document.getElementById('exportCsvBtn').addEventListener('click', function(){
   const tbody = document.getElementById('serialsTable').querySelector('tbody');
   const rows = tbody.querySelectorAll('tr');
@@ -553,16 +613,22 @@ document.getElementById('exportCsvBtn').addEventListener('click', function(){
   const school = document.getElementById('schoolName').value;
   const now = new Date();
   
+  // NEU: Verbesserte CSV mit Quellen-Info
   const csv = [
-    ['Seriennummer', 'Gerätetyp', 'Schüler/Empfänger', 'Klasse', 'Bemerkung', 'Stadt', 'Typ', 'Schule', 'Export-Datum', 'Dateiname'],
+    ['Seriennummer', 'Gerätetyp', 'Schüler/Empfänger', 'Klasse', 'Bemerkung', 'Quelle', 'Stadt', 'Typ', 'Schule', 'Export-Datum', 'Dateiname'],
     ...Array.from(rows).map(row => {
       const cells = row.querySelectorAll('td');
+      const serial = cells[0]?.textContent || '';
+      const isScanned = scannedBarcodes.has(serial);
+      const source = isScanned ? 'Gescannt' : 'Manuell/CSV';
+      
       return [
-        cells[0]?.textContent || '',
+        serial,
         cells[1]?.textContent || '',
         cells[2]?.textContent || '',
         cells[3]?.textContent || '',
         cells[4]?.textContent || '',
+        source,
         city,
         docType,
         school,
@@ -583,10 +649,10 @@ document.getElementById('exportCsvBtn').addEventListener('click', function(){
   link.click();
   document.body.removeChild(link);
   
-  showAlert(`✅ CSV exportiert: ${filename}.csv`, 'success');
+  showAlert(`✅ CSV exportiert: ${filename}.csv (${rows.length} Einträge)`, 'success');
 });
 
-// PDF speichern
+// PDF speichern - MODIFIZIERT
 document.getElementById('savePdfBtn').addEventListener('click', async function(){
   const { jsPDF } = window.jspdf;
   
@@ -653,6 +719,7 @@ document.getElementById('savePdfBtn').addEventListener('click', async function()
       }
     }
     
+    // NEU: Erweiterte Metadaten-Seite mit allen Seriennummern
     pdf.addPage();
     pdf.setFontSize(8);
     pdf.setTextColor(255, 255, 255);
@@ -664,10 +731,13 @@ document.getElementById('savePdfBtn').addEventListener('click', async function()
     pdf.text(`Dateiname: ${filename}`, 5, yPos); yPos += 5;
     pdf.text(`Datum: ${document.getElementById('deliveryDate').value}`, 5, yPos); yPos += 5;
     pdf.text(`Empfänger: ${document.getElementById('teacherName').value}`, 5, yPos); yPos += 5;
-    pdf.text(`Gescannt: ${scannedCount}, CSV: ${csvImportCount}, Manuell: ${manualCount}`, 5, yPos); yPos += 5;
+    pdf.text(`Gescannt: ${scannedCount}, CSV: ${csvImportCount}, Manuell: ${manualCount}`, 5, yPos); yPos += 10;
+    
+    // NEU: Alle Seriennummern mit Quelle auflisten
+    pdf.text(`=== ALLE SERIENNUMMERN ===`, 5, yPos); yPos += 5;
     
     const rows = tbody.querySelectorAll('tr');
-    rows.forEach(row => {
+    rows.forEach((row, index) => {
       const cells = row.querySelectorAll('td');
       if(cells.length >= 5){
         const serial = cells[0].textContent.trim();
@@ -676,12 +746,16 @@ document.getElementById('savePdfBtn').addEventListener('click', async function()
         const klass = cells[3].textContent.trim();
         const note = cells[4].textContent.trim();
         
-        pdf.text(`Seriennummer: ${serial}`, 5, yPos); yPos += 4;
-        if(type) pdf.text(`Typ: ${type}`, 5, yPos); yPos += 4;
-        if(student) pdf.text(`Schüler: ${student}`, 5, yPos); yPos += 4;
-        if(klass) pdf.text(`Klasse: ${klass}`, 5, yPos); yPos += 4;
-        if(note) pdf.text(`Bemerkung: ${note}`, 5, yPos); yPos += 4;
-        yPos += 3;
+        // NEU: Quelle kennzeichnen
+        const isScanned = scannedBarcodes.has(serial);
+        const source = isScanned ? '[SCAN]' : '[MAN]';
+        
+        pdf.text(`${index + 1}. ${source} SN: ${serial}`, 5, yPos); yPos += 4;
+        if(type) pdf.text(`   Typ: ${type}`, 5, yPos); yPos += 4;
+        if(student) pdf.text(`   Schüler: ${student}`, 5, yPos); yPos += 4;
+        if(klass) pdf.text(`   Klasse: ${klass}`, 5, yPos); yPos += 4;
+        if(note) pdf.text(`   Bem: ${note}`, 5, yPos); yPos += 4;
+        yPos += 2;
         
         if(yPos > 280){
           pdf.addPage();
@@ -689,6 +763,20 @@ document.getElementById('savePdfBtn').addEventListener('click', async function()
         }
       }
     });
+    
+    // NEU: Zusammenfassung gescannter Barcodes
+    if(scannedBarcodes.size > 0) {
+      pdf.addPage();
+      yPos = 10;
+      pdf.text(`=== GESCANNTE BARCODES (${scannedBarcodes.size}) ===`, 5, yPos); yPos += 5;
+      Array.from(scannedBarcodes).forEach((barcode, i) => {
+        pdf.text(`${i + 1}. ${barcode}`, 5, yPos); yPos += 4;
+        if(yPos > 285) {
+          pdf.addPage();
+          yPos = 10;
+        }
+      });
+    }
     
     const allSerials = Array.from(rows).map(r => r.querySelector('td')?.textContent || '').filter(s => s).join(', ');
     pdf.setProperties({
@@ -700,7 +788,7 @@ document.getElementById('savePdfBtn').addEventListener('click', async function()
     });
     
     pdf.save(finalName);
-    alert('PDF erfolgreich erstellt!\n\nDateiname: ' + finalName + '\n\nDas PDF enthält durchsuchbaren Text für Spotlight.');
+    alert(`PDF erfolgreich erstellt!\n\nDateiname: ${finalName}\nEinträge: ${rows.length}\nGescannt: ${scannedCount}\nCSV: ${csvImportCount}\nManuell: ${manualCount}\n\nDas PDF enthält durchsuchbaren Text für Spotlight.`);
     
   } catch(err) {
     alert('Fehler beim Erstellen des PDFs: ' + (err && err.message ? err.message : err));
